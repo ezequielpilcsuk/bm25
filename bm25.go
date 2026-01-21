@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log"
 	"math"
+	"strconv"
+	"sync"
 )
 
 // BM25 is an interface that defines the common methods for all BM25 variants.
@@ -25,6 +27,7 @@ type bm25Base struct {
 	docLengths []int
 	termFreqs  map[string]int
 	idfCache   map[string]float64
+	idfCacheMu sync.RWMutex
 	tokenizer  func(string) []string
 	logger     *log.Logger
 }
@@ -51,7 +54,7 @@ func NewBM25Base(corpus []string, tokenizer func(string) []string, logger *log.L
 	for i, doc := range corpus {
 		tokens := tokenizer(doc)
 		if len(tokens) == 0 {
-			return nil, errors.New("tokenizer function returned an empty slice for document at index " + string(i))
+			return nil, errors.New("tokenizer function returned an empty slice for document at index " + strconv.Itoa(i))
 		}
 		base.corpus[i] = tokens
 		base.docLengths = append(base.docLengths, len(tokens))
@@ -88,18 +91,26 @@ func (b *bm25Base) DocLengths() []int {
 }
 
 // IDF returns the inverse document frequency (IDF) of the given term.
+// This function is safe for concurrent use.
 func (b *bm25Base) IDF(term string) (float64, error) {
 	if term == "" {
 		return 0, errors.New("term cannot be empty")
 	}
 
+	// Fast path: try read lock first for cached values
+	b.idfCacheMu.RLock()
 	if idf, ok := b.idfCache[term]; ok {
+		b.idfCacheMu.RUnlock()
 		return idf, nil
 	}
+	b.idfCacheMu.RUnlock()
 
+	// Slow path: need to calculate and cache
 	termFreq, ok := b.termFreqs[term]
-	if !ok {
+	if ok == false {
+		b.idfCacheMu.Lock()
 		b.idfCache[term] = 0.0
+		b.idfCacheMu.Unlock()
 		return 0.0, nil
 	}
 
@@ -108,7 +119,10 @@ func (b *bm25Base) IDF(term string) (float64, error) {
 	}
 
 	idf := math.Log((float64(b.corpusSize) - float64(termFreq) + 0.5) / (float64(termFreq) + 0.5))
+
+	b.idfCacheMu.Lock()
 	b.idfCache[term] = idf
+	b.idfCacheMu.Unlock()
 
 	if b.logger != nil {
 		b.logger.Printf("IDF for term '%s': %.2f", term, idf)

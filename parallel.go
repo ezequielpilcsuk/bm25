@@ -6,12 +6,14 @@ import (
 )
 
 // GetScoresParallel returns the BM25 scores for the given query using parallel computation.
+// This function is safe for concurrent use.
 func (b *bm25Base) GetScoresParallel(query []string, bm25 BM25) ([]float64, error) {
 	if len(query) == 0 {
 		return nil, errors.New("query cannot be empty")
 	}
 
 	var wg sync.WaitGroup
+	var scoresMu sync.Mutex
 	scores := make([]float64, b.corpusSize)
 	wg.Add(len(query))
 
@@ -33,10 +35,19 @@ func (b *bm25Base) GetScoresParallel(query []string, bm25 BM25) ([]float64, erro
 				return
 			}
 
+			// Accumulate partial scores for this query term
+			partialScores := make([]float64, b.corpusSize)
 			for i, docLen := range b.docLengths {
 				k := computeK(bm25, docLen)
-				scores[i] += idf * computeScore(bm25, qFreq[i], k)
+				partialScores[i] = idf * computeScore(bm25, qFreq[i], k)
 			}
+
+			// Merge partial scores into final scores with synchronization
+			scoresMu.Lock()
+			for i := range partialScores {
+				scores[i] += partialScores[i]
+			}
+			scoresMu.Unlock()
 		}(q)
 	}
 
@@ -81,6 +92,7 @@ func computeScore(bm25 BM25, qFreq, k float64) float64 {
 }
 
 // GetBatchScoresParallel returns the BM25 scores for the given query and a subset of documents using parallel computation.
+// This function is safe for concurrent use.
 func (b *bm25Base) GetBatchScoresParallel(query []string, docIDs []int, bm25 BM25) ([]float64, error) {
 	if len(query) == 0 {
 		return nil, errors.New("query cannot be empty")
@@ -91,6 +103,7 @@ func (b *bm25Base) GetBatchScoresParallel(query []string, docIDs []int, bm25 BM2
 	}
 
 	var wg sync.WaitGroup
+	var scoresMu sync.Mutex
 	scores := make([]float64, len(docIDs))
 	wg.Add(len(query))
 
@@ -118,14 +131,23 @@ func (b *bm25Base) GetBatchScoresParallel(query []string, docIDs []int, bm25 BM2
 				return
 			}
 
+			// Accumulate partial scores for this query term
+			partialScores := make([]float64, len(docIDs))
 			for i, docID := range docIDs {
 				if docID < 0 || docID >= b.corpusSize {
 					continue
 				}
 				docLen := b.docLengths[docID]
 				k := computeK(bm25, docLen)
-				scores[i] += idf * computeScore(bm25, qFreq[i], k)
+				partialScores[i] = idf * computeScore(bm25, qFreq[i], k)
 			}
+
+			// Merge partial scores into final scores with synchronization
+			scoresMu.Lock()
+			for i := range partialScores {
+				scores[i] += partialScores[i]
+			}
+			scoresMu.Unlock()
 		}(q)
 	}
 
